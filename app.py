@@ -133,7 +133,7 @@ elif page == "2. 模型训练":
             ax.plot(epoch_losses, color='royalblue')
             ax.set_xlabel('Epoch')
             ax.set_ylabel('MSE Loss')
-            ax.set_title('训练损失曲线')
+            ax.set_title('Training Loss Curve')
             ax.grid(True, alpha=0.3)
             st.pyplot(fig_loss)
             
@@ -211,3 +211,4 @@ elif page == "3. 预测推理":
     else: 
 
         st.warning("请先切换到‘模型训练’标签页完成模型训练。")
+

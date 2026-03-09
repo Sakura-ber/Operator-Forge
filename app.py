@@ -9,6 +9,12 @@ import data_utils as du
 from fno_model import FNO2d
 from deeponet_model import DeepONet
 
+# ====================== 设备辅助函数 ======================
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
 st.set_page_config(page_title="PDE AI Platform", layout="wide")
 
 if 'model' not in st.session_state: st.session_state.model = None
@@ -64,34 +70,97 @@ elif page == "2. 模型训练":
             hd = st.slider("Hidden Dim", 64, 512, 128); p_dim = st.slider("p Dim", 32, 256, 100)
 
     file = st.file_uploader("上传数据", type="npz")
+    
     if file and st.button("开始训练"):
+        # 数据加载
         data = np.load(file)
         f_t = torch.FloatTensor(data['f']).unsqueeze(-1)
         u_t = torch.FloatTensor(data['u']).unsqueeze(-1)
         nx = int(data['nx'])
         loader = DataLoader(TensorDataset(f_t, u_t), batch_size=int(bs), shuffle=True)
         
+        # 设备设置
+        device = get_device()
+        st.info(f"当前计算设备: {device}")
+        
+        # 模型初始化
         model = FNO2d(m1, m1, w) if arch == "FNO" else DeepONet(nx*nx, hd, p_dim)
+        model.to(device) # GPU 移动
+        
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         criterion = nn.MSELoss()
         
+        # 训练过程记录
+        epoch_losses = []
         p_bar, status = st.progress(0), st.empty()
+        
         for epoch in range(int(epochs)):
             loss_list = []
             for bf, bu in loader:
+                # 数据移至GPU
+                bf, bu = bf.to(device), bu.to(device)
+                
                 optimizer.zero_grad()
-                if arch == "FNO": pred = model(bf)
+                if arch == "FNO": 
+                    pred = model(bf)
                 else:
                     coords = torch.stack(torch.meshgrid(torch.linspace(0,1,nx), torch.linspace(0,1,nx), indexing='ij'), -1).reshape(-1,2).unsqueeze(0).repeat(bf.size(0),1,1)
+                    coords = coords.to(device) # 坐标移至GPU
                     pred = model(bf.view(bf.size(0),-1), coords).view(-1, nx, nx, 1)
+                
                 loss = criterion(pred, bu)
-                loss.backward(); optimizer.step(); loss_list.append(loss.item())
+                loss.backward()
+                optimizer.step()
+                loss_list.append(loss.item())
+            
+            avg_loss = np.mean(loss_list)
+            epoch_losses.append(avg_loss)
             p_bar.progress((epoch+1)/int(epochs))
-            status.text(f"Epoch {epoch+1} Loss: {np.mean(loss_list):.6f}")
-        st.session_state.model = model
+            status.text(f"Epoch {epoch+1}/{int(epochs)} | Loss: {avg_loss:.6f}")
+        
+        # 保存模型 (移回CPU以便存储)
+        st.session_state.model = model.cpu()
         st.session_state.arch = arch
         st.session_state.nx = nx
         st.success("训练成功！")
+ # ====================== 板块 2: 结果可视化 ======================
+        st.subheader("📊 学习结果分析")
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            st.metric("最终损失", f"{epoch_losses[-1]:.6f}")
+            fig_loss, ax = plt.subplots()
+            ax.plot(epoch_losses, color='royalblue')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('MSE Loss')
+            ax.set_title('训练损失曲线')
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig_loss)
+            
+        with c2:
+            st.metric("相对误差", f"{np.sqrt(epoch_losses[-1]):.4f} (RMSE)")
+            st.info("右侧展示最后一个 Batch 的拟合效果对比")
+            # 绘制最后一个 batch 的对比图
+            with torch.no_grad():
+                # 数据已在CPU
+                true_u = bu[0].squeeze().numpy() if device.type == 'cpu' else bu[0].cpu().squeeze().numpy()
+                pred_u = pred[0].squeeze().cpu().numpy() # pred在GPU上，需取回CPU
+                
+                fig_cmp, axes = plt.subplots(1, 3, figsize=(12, 4))
+                im0 = axes[0].imshow(true_u, origin='lower')
+                axes[0].set_title("Ground Truth")
+                plt.colorbar(im0, ax=axes[0], fraction=0.046)
+                
+                im1 = axes[1].imshow(pred_u, origin='lower')
+                axes[1].set_title("Prediction")
+                plt.colorbar(im1, ax=axes[1], fraction=0.046)
+                
+                im2 = axes[2].imshow(np.abs(true_u - pred_u), cmap='hot', origin='lower')
+                axes[2].set_title("Absolute Error")
+                plt.colorbar(im2, ax=axes[2], fraction=0.046)
+                
+                plt.tight_layout()
+                st.pyplot(fig_cmp)
 
 # ====================== 3. 预测推理 ======================
 elif page == "3. 预测推理":
@@ -140,4 +209,5 @@ elif page == "3. 预测推理":
             st.error(f"解析错误或计算失败: {e}")
             st.info("提示：请确保表达式中使用的是大写 X, Y，并符合 numpy 语法。")
     else: 
+
         st.warning("请先切换到‘模型训练’标签页完成模型训练。")
